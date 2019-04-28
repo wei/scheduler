@@ -1,0 +1,9 @@
+version: "1"
+rules:
+  - base: master
+    upstream: probot:master
+    mergeMethod: hardreset
+  - base: fixes
+    upstream: master
+    assignees:
+      - wei
