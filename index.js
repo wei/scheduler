@@ -75,6 +75,7 @@ module.exports = (app, options) => {
       repos[repository.full_name] = new Date()
       app.receive(event)
     }, delay)
+    repos[repository.full_name] = 'ADDED'
   }
 
   async function eachInstallation (callback) {
