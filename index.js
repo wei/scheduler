@@ -13,6 +13,7 @@ const defaults = {
 module.exports = (app, options) => {
   options = Object.assign({}, defaults, options || {})
   const intervals = {}
+  const repos = {}
 
   // https://developer.github.com/v3/activity/events/types/#installationrepositoriesevent
   app.on('installation.created', async event => {
@@ -63,11 +64,15 @@ module.exports = (app, options) => {
 
       // Trigger events on this repository on an interval
       intervals[repository.id] = setInterval(
-        () => app.receive(event),
+        () => {
+          repos[repository.full_name] = new Date()
+          app.receive(event)
+        },
         options.interval
       )
 
       // Trigger the first event now
+      repos[repository.full_name] = new Date()
       app.receive(event)
     }, delay)
   }
@@ -110,7 +115,8 @@ module.exports = (app, options) => {
     app.log.info({ repository }, `Canceling interval`)
 
     clearInterval(intervals[repository.id])
+    repos[repository.full_name] = 'STOPPED'
   }
 
-  return { stop }
+  return { repos, stop }
 }
