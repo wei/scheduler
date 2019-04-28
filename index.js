@@ -1,6 +1,6 @@
 const Bottleneck = require('bottleneck')
 
-const limiter = new Bottleneck({ maxConcurrent: 1, minTime: 0 })
+const limiter = new Bottleneck({ maxConcurrent: 5, minTime: 0 })
 const ignoredAccounts = (process.env.IGNORED_ACCOUNTS || '')
   .toLowerCase()
   .split(',')
@@ -13,14 +13,20 @@ const defaults = {
 module.exports = (app, options) => {
   options = Object.assign({}, defaults, options || {})
   const intervals = {}
-  const repos = {}
+  const REPO_STATUS = {}
+  const INSTALLATIONS = {}
+  const REPOSITORIES = {}
+  const REPO_TO_INSTALLATION = {}
+  const REPO_NAME_TO_ID = {}
 
   // https://developer.github.com/v3/activity/events/types/#installationrepositoriesevent
   app.on('installation.created', async event => {
     const installation = event.payload.installation
+    INSTALLATIONS[installation.id] = installation
 
     eachRepository(installation, repository => {
-      schedule(installation, repository)
+      REPO_TO_INSTALLATION[repository.id] = installation.id
+      schedule(repository)
     })
   })
 
@@ -42,11 +48,12 @@ module.exports = (app, options) => {
     }
 
     limiter.schedule(eachRepository, installation, repository => {
-      schedule(installation, repository)
+      REPO_TO_INSTALLATION[repository.id] = installation.id
+      schedule(repository)
     })
   }
 
-  function schedule (installation, repository) {
+  function schedule (repository) {
     if (intervals[repository.id]) {
       return
     }
@@ -56,26 +63,27 @@ module.exports = (app, options) => {
 
     app.log.debug({ repository, delay, interval: options.interval }, `Scheduling interval`)
 
-    intervals[repository.id] = setTimeout(() => {
-      const event = {
-        name: 'schedule',
-        payload: { action: 'repository', installation, repository }
+    intervals[repository.id] = setTimeout(triggerEvent.bind(null, repository.id), delay)
+    REPO_STATUS[repository.full_name] = 'ADDED'
+  }
+
+  function triggerEvent (repoId, opts = {}) {
+    const repository = REPOSITORIES[repoId]
+    if (!repository) return
+    REPO_STATUS[repository.full_name] = new Date()
+    const event = {
+      name: 'schedule',
+      payload: { 
+        action: 'repository', 
+        manual: !!opts.manual,
+        installation: INSTALLATIONS[REPO_TO_INSTALLATION[repoId]], 
+        repository 
       }
-
-      // Trigger events on this repository on an interval
-      intervals[repository.id] = setInterval(
-        () => {
-          repos[repository.full_name] = new Date()
-          app.receive(event)
-        },
-        options.interval
-      )
-
-      // Trigger the first event now
-      repos[repository.full_name] = new Date()
-      app.receive(event)
-    }, delay)
-    repos[repository.full_name] = 'ADDED'
+    }
+    app.receive(event)
+    if (!opts.manual) {
+      intervals[repoId] = setTimeout(triggerEvent.bind(null, repoId), options.interval)
+    }
   }
 
   async function eachInstallation (callback) {
@@ -89,6 +97,11 @@ module.exports = (app, options) => {
     const filteredInstallations = options.filter
       ? installations.filter(inst => options.filter(inst))
       : installations
+
+    for (const i of filteredInstallations) {
+      INSTALLATIONS[i.id] = i
+    }
+
     return filteredInstallations.forEach(callback)
   }
 
@@ -107,17 +120,29 @@ module.exports = (app, options) => {
       ? repositories.filter(repo => options.filter(installation, repo))
       : repositories
 
+    for (const r of filteredRepositories) {
+      REPOSITORIES[r.id] = r
+      REPO_NAME_TO_ID[r.full_name] = r.id
+      REPO_TO_INSTALLATION[r.id] = installation.id
+    }
+
     return filteredRepositories.forEach(async repository =>
       callback(repository, github)
     )
+  }
+
+  function process (repoName) {
+    app.log.info({ repository: repoName }, `Manuel processing`)
+
+    triggerEvent(REPO_NAME_TO_ID[repoName], { manual: true })
   }
 
   function stop (repository) {
     app.log.info({ repository }, `Canceling interval`)
 
     clearInterval(intervals[repository.id])
-    repos[repository.full_name] = 'STOPPED'
+    REPO_STATUS[repository.full_name] = 'STOPPED'
   }
 
-  return { repos, stop }
+  return { REPOSITORIES, INSTALLATIONS, repos: REPO_STATUS, process, stop }
 }
